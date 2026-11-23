@@ -2,93 +2,91 @@ package com.luis.direccionrapida
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.BitmapFactory
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import android.widget.Toast
 
 class MainActivity : Activity() {
 
-    private val claves = listOf(
-        "calle", "ave", "avenida", "carr", "carretera", "urb", "bo.", "barrio",
-        "pr-", "cond", "sector", "camino", "parcela",
-        "caguas", "san juan", "bayamón", "carolina", "gurabo", "cidra",
-        "aguas buenas", "san lorenzo", "juncos", "guaynabo", "trujillo alto",
-        "cayey", "humacao", "río piedras"
-    )
-    private lateinit var lista: LinearLayout
+    private val pedirCaptura = 100
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val scroll = ScrollView(this)
-        lista = LinearLayout(this).apply {
+        val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(32, 48, 32, 32)
+            gravity = Gravity.CENTER
+            setPadding(48, 48, 48, 48)
         }
-        scroll.addView(lista)
-        setContentView(scroll)
-        procesar(intent)
+        col.addView(TextView(this).apply {
+            text = "Activa el botón flotante. Cuando te salga una oferta en Uber Eats o DoorDash, toca el botón 📍 y te abro la dirección en el mapa."
+            textSize = 18f
+            setPadding(0, 0, 0, 40)
+        })
+        col.addView(Button(this).apply {
+            text = "Activar botón flotante"
+            textSize = 20f
+            setOnClickListener { activar() }
+        })
+        col.addView(Button(this).apply {
+            text = "Apagar botón flotante"
+            textSize = 18f
+            setOnClickListener {
+                stopService(Intent(this@MainActivity, BotonFlotanteService::class.java))
+                Toast.makeText(this@MainActivity, "Botón apagado", Toast.LENGTH_SHORT).show()
+            }
+        })
+        setContentView(col)
+        if (Build.VERSION.SDK_INT >= 33) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
+        manejarCompartido(intent)
     }
 
-    override fun onNewIntent(nuevo: Intent) {
-        super.onNewIntent(nuevo)
-        procesar(nuevo)
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        manejarCompartido(intent)
     }
 
-    @Suppress("DEPRECATION")
-    private fun procesar(i: Intent?) {
-        lista.removeAllViews()
-        val uri: Uri? = if (i?.action == Intent.ACTION_SEND)
-            i.getParcelableExtra(Intent.EXTRA_STREAM) else null
-        if (uri == null) {
-            titulo("Toma captura de la oferta y compártela con Dirección Rápida.")
+    private fun activar() {
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Activa el permiso para mostrar sobre otras apps y vuelve", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             return
         }
-        titulo("Leyendo captura...")
-        try {
-            val img = InputImage.fromFilePath(this, uri)
-            TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-                .process(img)
-                .addOnSuccessListener { r ->
-                    mostrar(r.textBlocks.flatMap { it.lines }
-                        .map { it.text.trim() }
-                        .filter { it.length > 3 })
-                }
-                .addOnFailureListener { titulo("No pude leer la imagen.") }
-        } catch (e: Exception) {
-            titulo("No pude abrir la imagen.")
+        val mpm = getSystemService(MediaProjectionManager::class.java)
+        startActivityForResult(mpm.createScreenCaptureIntent(), pedirCaptura)
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == pedirCaptura && resultCode == RESULT_OK && data != null) {
+            val i = Intent(this, BotonFlotanteService::class.java)
+                .putExtra("code", resultCode)
+                .putExtra("data", data)
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+            moveTaskToBack(true)
         }
     }
 
-    private fun mostrar(lineas: List<String>) {
-        lista.removeAllViews()
-        val buenas = lineas.filter { l -> claves.any { l.lowercase().contains(it) } }
-        titulo("Toca una línea para verla en el mapa:")
-        (buenas + lineas.filter { it !in buenas }).forEach { l ->
-            lista.addView(Button(this).apply {
-                text = l
-                isAllCaps = false
-                if (l in buenas) setBackgroundColor(0xFF4CAF50.toInt())
-                setOnClickListener { abrirMapa(l) }
-            })
+    private fun manejarCompartido(i: Intent?) {
+        if (i?.action != Intent.ACTION_SEND) return
+        val uri: Uri? = if (Build.VERSION.SDK_INT >= 33) {
+            i.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            i.getParcelableExtra(Intent.EXTRA_STREAM)
         }
-    }
-
-    private fun abrirMapa(t: String) {
-        val q = Uri.encode("$t, Puerto Rico")
-        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("geo:0,0?q=$q")))
-    }
-
-    private fun titulo(t: String) {
-        lista.addView(TextView(this).apply {
-            text = t
-            textSize = 20f
-            setPadding(0, 0, 0, 24)
-        })
+        if (uri == null) return
+        val bmp = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) } ?: return
+        LectorDireccion.leerYAbrir(this, bmp)
     }
 }
